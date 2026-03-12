@@ -29,6 +29,8 @@ class ParsedQuestion:
     # For MCQ we store 1-based index of correct option (1..len(options))
     correct_index: Optional[int] = None
     correct_text: Optional[str] = None
+    # Best-effort page number (0-based) where the question appears in the PDF
+    page_index: Optional[int] = None
 
     def to_dict(self) -> dict:
         return {
@@ -37,6 +39,7 @@ class ParsedQuestion:
             "options": self.options,
             "correct_index": self.correct_index,
             "correct_text": self.correct_text,
+            "page_index": self.page_index,
         }
 
 
@@ -59,6 +62,41 @@ def extract_pdf_text_to_lines(pdf_path: str) -> List[str]:
         text = "\n".join(text_parts)
     lines = [ln.strip() for ln in text.splitlines()]
     return [ln for ln in lines if ln]
+
+
+def extract_pdf_pages_to_lines(pdf_path: str) -> List[List[str]]:
+    """
+    Extract text per page so we can map questions back to their page (for rendering code/images).
+    Returns a list of pages, each page is a list of non-empty stripped lines.
+    """
+    if _PDFMINER_AVAILABLE and extract_text is not None:
+        # pdfminer can extract per-page by specifying page_numbers
+        try:
+            # We'll still fall back if anything goes wrong.
+            from pdfminer.high_level import extract_text as _extract_text  # type: ignore
+
+            pages: List[List[str]] = []
+            # Try probing page count with PyPDF2 (cheap, reliable)
+            reader = PdfReader(pdf_path)
+            for i in range(len(reader.pages)):
+                t = _extract_text(pdf_path, page_numbers=[i]) or ""
+                lines = [ln.strip() for ln in t.splitlines()]
+                pages.append([ln for ln in lines if ln])
+            return pages
+        except Exception:
+            pass
+
+    # Fallback: PyPDF2 per page
+    reader = PdfReader(pdf_path)
+    pages: List[List[str]] = []
+    for page in reader.pages:
+        try:
+            t = page.extract_text() or ""
+        except Exception:
+            t = ""
+        lines = [ln.strip() for ln in t.splitlines()]
+        pages.append([ln for ln in lines if ln])
+    return pages
 
 
 def extract_correct_option_ids_from_pdf(pdf_path: str) -> List[str]:
@@ -414,6 +452,41 @@ def parse_iitm_question_paper(
             "Correct answers were not detected. If this is an answer-key PDF, ensure correct options are visible (often in green) or present as text."
         )
     return questions, debug
+
+
+def parse_iitm_question_paper_from_pages(
+    pages_lines: List[List[str]], correct_option_ids: Optional[List[str]] = None
+) -> Tuple[List[ParsedQuestion], dict]:
+    """
+    Same as `parse_iitm_question_paper`, but keeps track of `page_index` for each question.
+    """
+    all_questions: List[ParsedQuestion] = []
+    merged_debug = {
+        "total_pages": len(pages_lines),
+        "total_lines": sum(len(p) for p in pages_lines),
+        "detected_questions": 0,
+        "questions_missing_answers": 0,
+        "questions_missing_options": 0,
+        "notes": [],
+        "used_parser": "iitm_question_paper_from_pages",
+        "correct_ids_detected": len(correct_option_ids or []),
+    }
+
+    for page_index, plines in enumerate(pages_lines):
+        qs, dbg = parse_iitm_question_paper(plines, correct_option_ids=correct_option_ids)
+        for q in qs:
+            q.page_index = page_index
+        all_questions.extend(qs)
+
+        # Collect notes
+        for n in dbg.get("notes", []):
+            if n not in merged_debug["notes"]:
+                merged_debug["notes"].append(n)
+
+    merged_debug["detected_questions"] = len(all_questions)
+    merged_debug["questions_missing_options"] = sum(1 for q in all_questions if not q.options)
+    merged_debug["questions_missing_answers"] = sum(1 for q in all_questions if q.correct_index is None)
+    return all_questions, merged_debug
 
 
 def questions_to_pretty_json(questions: List[ParsedQuestion], debug: dict) -> str:

@@ -1,4 +1,3 @@
-import json
 import os
 import tempfile
 from typing import Dict, List, Optional
@@ -8,11 +7,20 @@ import streamlit as st
 from utils.mock_pdf_parser import (
     ParsedQuestion,
     extract_correct_option_ids_from_pdf,
-    extract_pdf_text_to_lines,
+    extract_pdf_pages_to_lines,
     parse_iitm_question_paper,
+    parse_iitm_question_paper_from_pages,
     parse_questions_from_lines,
     questions_to_pretty_json,
 )
+
+try:
+    import fitz  # PyMuPDF
+
+    _PYMUPDF_AVAILABLE = True
+except Exception:
+    fitz = None  # type: ignore
+    _PYMUPDF_AVAILABLE = False
 
 
 st.set_page_config(page_title="Mock Test (PDF)", page_icon="📄")
@@ -40,6 +48,7 @@ def _ensure_state():
     st.session_state.setdefault("mock_debug", None)
     st.session_state.setdefault("mock_answers", {})
     st.session_state.setdefault("mock_submitted", False)
+    st.session_state.setdefault("mock_pdf_bytes", None)
 
 
 def _reset_exam():
@@ -106,15 +115,18 @@ If your `AppDev2.pdf` uses a different layout, we can tune the parser quickly us
 
     if parse_btn and pdf is not None:
         # pdfminer wants a file path
+        pdf_bytes = pdf.read()
+        st.session_state["mock_pdf_bytes"] = pdf_bytes
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-            tmp.write(pdf.read())
+            tmp.write(pdf_bytes)
             tmp_path = tmp.name
 
         try:
-            lines = extract_pdf_text_to_lines(tmp_path)
+            pages_lines = extract_pdf_pages_to_lines(tmp_path)
+            lines = [ln for page in pages_lines for ln in page]
             # Try IITM parser first (matches "Question Number : X" style)
             correct_ids = extract_correct_option_ids_from_pdf(tmp_path)
-            questions, debug = parse_iitm_question_paper(lines, correct_option_ids=correct_ids)
+            questions, debug = parse_iitm_question_paper_from_pages(pages_lines, correct_option_ids=correct_ids)
             if not questions:
                 # Fallback to generic parser
                 questions, debug = parse_questions_from_lines(lines)
@@ -157,6 +169,21 @@ If your `AppDev2.pdf` uses a different layout, we can tune the parser quickly us
     # Render questions in serial order
     for q in sorted(questions, key=lambda x: x.q_no):
         st.markdown(f"### Q{q.q_no}")
+
+        # If the question contains code/images in the PDF, text extraction won't capture it.
+        # Show a page snapshot (best-effort) so the user can see embedded code blocks.
+        if _PYMUPDF_AVAILABLE and st.session_state.get("mock_pdf_bytes") and q.page_index is not None:
+            with st.expander("Show original PDF page (for code/images)", expanded=False):
+                try:
+                    doc = fitz.open(stream=st.session_state["mock_pdf_bytes"], filetype="pdf")
+                    page = doc.load_page(int(q.page_index))
+                    pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # 2x for readability
+                    st.image(pix.tobytes("png"), caption=f"PDF page {int(q.page_index) + 1}")
+                except Exception as e:
+                    st.info(f"Could not render PDF page image: {e}")
+        elif q.page_index is not None and not _PYMUPDF_AVAILABLE:
+            st.caption("PDF page rendering unavailable (missing PyMuPDF).")
+
         st.write(q.question or "")
 
         if not q.options:
