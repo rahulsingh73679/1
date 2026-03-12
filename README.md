@@ -8,6 +8,7 @@ A comprehensive Streamlit-based web application for IITM students to practice ex
 2. **Grade Calculator**: Calculate your grades based on various assessment scores for Foundational and Diploma level courses
 3. **Response Sheet Evaluator**: Upload answer keys and response sheets to automatically evaluate your performance
 4. **Guidelines**: Comprehensive instructions on how to use the platform
+5. **Mock Test from PDF (NEW)**: Upload a question paper PDF (with options + answers) and take a mock test; answers reveal only after submit
 
 ## Setup Instructions
 
@@ -61,6 +62,13 @@ smartiitm-main/
 - **Image**: Image data stored as BLOB
 
 ## Usage
+
+### Mock Test from PDF (NEW)
+1. Navigate to **Mock Test (PDF)** from the sidebar
+2. Upload your PDF question paper (ideally containing question numbers, options, and an answer line)
+3. Click **Parse PDF**
+4. Attempt questions in order
+5. Click **Submit Mock Test** to reveal answers and score
 
 ### Practice Mode
 1. Select a subject from the dropdown
