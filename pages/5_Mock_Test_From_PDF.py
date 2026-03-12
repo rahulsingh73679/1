@@ -7,7 +7,9 @@ import streamlit as st
 
 from utils.mock_pdf_parser import (
     ParsedQuestion,
+    extract_correct_option_ids_from_pdf,
     extract_pdf_text_to_lines,
+    parse_iitm_question_paper,
     parse_questions_from_lines,
     questions_to_pretty_json,
 )
@@ -110,10 +112,19 @@ If your `AppDev2.pdf` uses a different layout, we can tune the parser quickly us
 
         try:
             lines = extract_pdf_text_to_lines(tmp_path)
-            questions, debug = parse_questions_from_lines(lines)
+            # Try IITM parser first (matches "Question Number : X" style)
+            correct_ids = extract_correct_option_ids_from_pdf(tmp_path)
+            questions, debug = parse_iitm_question_paper(lines, correct_option_ids=correct_ids)
+            if not questions:
+                # Fallback to generic parser
+                questions, debug = parse_questions_from_lines(lines)
 
             st.session_state["mock_questions"] = questions
-            st.session_state["mock_debug"] = {"parser": debug, "sample_lines": lines[:200]}
+            st.session_state["mock_debug"] = {
+                "parser": debug,
+                "sample_lines": lines[:200],
+                "correct_option_ids_detected": correct_ids[:50],
+            }
             _reset_exam()
         finally:
             try:
@@ -204,6 +215,9 @@ If your `AppDev2.pdf` uses a different layout, we can tune the parser quickly us
         if debug:
             st.write("Parser summary:")
             st.json(debug.get("parser", {}))
+            if debug.get("correct_option_ids_detected"):
+                st.write("First detected correct option IDs (max 50):")
+                st.code("\n".join(debug.get("correct_option_ids_detected", [])))
             st.write("First ~200 extracted lines:")
             st.code("\n".join(debug.get("sample_lines", [])))
         st.write("Parsed output (JSON):")
