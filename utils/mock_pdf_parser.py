@@ -79,12 +79,22 @@ def extract_correct_option_ids_from_pdf(pdf_path: str) -> List[str]:
             if isinstance(element, LTTextContainer):
                 is_correct = False
                 for text_line in element:
-                    # text_line is usually LTTextLineHorizontal
-                    for character in text_line:
+                    # `text_line` is usually LTTextLineHorizontal, but be defensive:
+                    # some layout objects may not be iterable in certain pdfminer versions.
+                    try:
+                        iterator = iter(text_line)  # type: ignore[arg-type]
+                    except TypeError:
+                        continue
+
+                    for character in iterator:
                         if isinstance(character, LTChar):
-                            if character.graphicstate.ncolor == (0, 0.50196, 0):
-                                is_correct = True
-                                break
+                            try:
+                                if character.graphicstate.ncolor == (0, 0.50196, 0):
+                                    is_correct = True
+                                    break
+                            except Exception:
+                                # If color info isn't available, skip.
+                                pass
                     if is_correct:
                         break
 
