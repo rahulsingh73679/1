@@ -46,6 +46,7 @@ def _add_logo():
 def _ensure_state():
     st.session_state.setdefault("mock_questions", None)
     st.session_state.setdefault("mock_debug", None)
+    # q_no -> int (MCQ) or list[int] (MSQ)
     st.session_state.setdefault("mock_answers", {})
     st.session_state.setdefault("mock_submitted", False)
     st.session_state.setdefault("mock_pdf_bytes", None)
@@ -71,6 +72,41 @@ def _score(questions: List[ParsedQuestion], user_answers: Dict[int, int]) -> Dic
         attempted += 1
         if q.correct_index is not None and int(ua) == int(q.correct_index):
             correct += 1.0
+
+    pct = (correct * 100.0 / total) if total else 0.0
+    return {"total": total, "attempted": attempted, "correct": correct, "percentage": pct}
+
+
+def _score_v2(questions: List[ParsedQuestion], user_answers: Dict[int, object]) -> Dict[str, float]:
+    total = 0.0
+    correct = 0.0
+    attempted = 0
+
+    for q in questions:
+        if not q.options:
+            continue
+        total += 1.0
+        ua = user_answers.get(q.q_no)
+        if ua is None:
+            continue
+        attempted += 1
+
+        qtype = (q.question_type or "MCQ").upper()
+        if qtype == "MSQ":
+            if not isinstance(ua, list):
+                continue
+            if not q.correct_indices:
+                continue
+            if sorted(set(ua)) == sorted(set(q.correct_indices)):
+                correct += 1.0
+        else:
+            if q.correct_index is None:
+                continue
+            try:
+                if int(ua) == int(q.correct_index):
+                    correct += 1.0
+            except Exception:
+                pass
 
     pct = (correct * 100.0 / total) if total else 0.0
     return {"total": total, "attempted": attempted, "correct": correct, "percentage": pct}
@@ -190,33 +226,67 @@ If your `AppDev2.pdf` uses a different layout, we can tune the parser quickly us
             st.warning("Options not detected for this question.")
             continue
 
-        # Use radio for MCQ
         opt_labels = [f"{i+1}. {opt}" for i, opt in enumerate(q.options)]
-        key = f"mock_q_{q.q_no}"
+        qtype = (q.question_type or "MCQ").upper()
 
-        if st.session_state["mock_submitted"]:
-            # Lock UI after submission
-            chosen = st.session_state["mock_answers"].get(q.q_no)
-            st.radio("Your answer", opt_labels, index=(chosen - 1) if chosen else 0, key=key, disabled=True)
-        else:
-            chosen_label = st.radio("Choose an option", ["(unanswered)"] + opt_labels, index=0, key=key)
-            if chosen_label != "(unanswered)":
-                chosen_idx = int(chosen_label.split(".", 1)[0])
-                st.session_state["mock_answers"][q.q_no] = chosen_idx
+        if qtype == "MSQ":
+            key = f"mock_msq_{q.q_no}"
+            default = st.session_state["mock_answers"].get(q.q_no, [])
+            if not isinstance(default, list):
+                default = []
+            default_labels = [opt_labels[i - 1] for i in default if 1 <= i <= len(opt_labels)]
+
+            if st.session_state["mock_submitted"]:
+                st.multiselect("Your answers", opt_labels, default=default_labels, key=key, disabled=True)
             else:
-                st.session_state["mock_answers"].pop(q.q_no, None)
+                chosen = st.multiselect("Choose one or more options", opt_labels, default=default_labels, key=key)
+                chosen_idxs = []
+                for c in chosen:
+                    try:
+                        chosen_idxs.append(int(c.split(".", 1)[0]))
+                    except Exception:
+                        pass
+                if chosen_idxs:
+                    st.session_state["mock_answers"][q.q_no] = sorted(set(chosen_idxs))
+                else:
+                    st.session_state["mock_answers"].pop(q.q_no, None)
+        else:
+            key = f"mock_mcq_{q.q_no}"
+            if st.session_state["mock_submitted"]:
+                chosen = st.session_state["mock_answers"].get(q.q_no)
+                chosen = chosen if isinstance(chosen, int) else None
+                st.radio("Your answer", opt_labels, index=(chosen - 1) if chosen else 0, key=key, disabled=True)
+            else:
+                chosen_label = st.radio("Choose an option", ["(unanswered)"] + opt_labels, index=0, key=key)
+                if chosen_label != "(unanswered)":
+                    chosen_idx = int(chosen_label.split(".", 1)[0])
+                    st.session_state["mock_answers"][q.q_no] = chosen_idx
+                else:
+                    st.session_state["mock_answers"].pop(q.q_no, None)
 
         # Reveal answers only after submit
         if st.session_state["mock_submitted"]:
-            correct = q.correct_index
-            if correct is None:
-                st.info("Correct answer not found in PDF for this question.")
-            else:
-                ua = st.session_state["mock_answers"].get(q.q_no)
-                if ua == correct:
-                    st.success(f"Correct. Answer: **{correct}**")
+            if qtype == "MSQ":
+                corrects = q.correct_indices or []
+                if not corrects:
+                    st.info("Correct answer not found in PDF for this question.")
                 else:
-                    st.error(f"Wrong. Correct answer: **{correct}**")
+                    ua = st.session_state["mock_answers"].get(q.q_no, [])
+                    ua = ua if isinstance(ua, list) else []
+                    if sorted(set(ua)) == sorted(set(corrects)):
+                        st.success(f"Correct. Answers: **{', '.join(str(x) for x in corrects)}**")
+                    else:
+                        st.error(f"Wrong. Correct answers: **{', '.join(str(x) for x in corrects)}**")
+            else:
+                correct = q.correct_index
+                if correct is None:
+                    st.info("Correct answer not found in PDF for this question.")
+                else:
+                    ua = st.session_state["mock_answers"].get(q.q_no)
+                    if ua == correct:
+                        st.success(f"Correct. Answer: **{correct}**")
+                    else:
+                        st.error(f"Wrong. Correct answer: **{correct}**")
 
         st.markdown("---")
 
@@ -225,7 +295,7 @@ If your `AppDev2.pdf` uses a different layout, we can tune the parser quickly us
         st.session_state["mock_submitted"] = True
 
     if st.session_state["mock_submitted"]:
-        s = _score(questions, st.session_state["mock_answers"])
+        s = _score_v2(questions, st.session_state["mock_answers"])
         st.divider()
         st.subheader("Result")
         st.markdown(

@@ -26,8 +26,11 @@ class ParsedQuestion:
     q_no: int
     question: str
     options: List[str]
+    question_type: Optional[str] = None  # "MCQ" / "MSQ" / "SA" (best-effort)
     # For MCQ we store 1-based index of correct option (1..len(options))
     correct_index: Optional[int] = None
+    # For MSQ we store 1-based indices of correct options
+    correct_indices: Optional[List[int]] = None
     correct_text: Optional[str] = None
     # Best-effort page number (0-based) where the question appears in the PDF
     page_index: Optional[int] = None
@@ -37,7 +40,9 @@ class ParsedQuestion:
             "q_no": self.q_no,
             "question": self.question,
             "options": self.options,
+            "question_type": self.question_type,
             "correct_index": self.correct_index,
+            "correct_indices": self.correct_indices,
             "correct_text": self.correct_text,
             "page_index": self.page_index,
         }
@@ -319,7 +324,12 @@ def parse_questions_from_lines(lines: List[str]) -> Tuple[List[ParsedQuestion], 
 
 
 _IITM_QNO_RE = re.compile(r"^Question\s+Number\s*:\s*(\d{1,4})\b", re.IGNORECASE)
+_IITM_QTYPE_RE = re.compile(r"\bQuestion\s+Type\s*:\s*(MCQ|MSQ|SA)\b", re.IGNORECASE)
 _IITM_OPT_ID_RE = re.compile(r"^(640653\d+)\.$")
+_IITM_OPT_INLINE_RE = re.compile(r"^(640653\d+)\.\s*(.+)$")
+
+# Common "correct" markers seen in extracted text
+_CORRECT_MARKERS = ("☑", "✔", "✓", "✅")
 
 
 def parse_iitm_question_paper(
@@ -349,29 +359,44 @@ def parse_iitm_question_paper(
     cur_q_text: List[str] = []
     cur_options: List[str] = []
     cur_option_ids: List[str] = []
+    cur_q_type: Optional[str] = None
+    cur_correct_indices: List[int] = []
 
     in_options = False
     awaiting_opt_text = False
 
     def flush():
-        nonlocal cur_q_no, cur_q_text, cur_options, cur_option_ids, in_options, awaiting_opt_text
+        nonlocal cur_q_no, cur_q_text, cur_options, cur_option_ids, in_options, awaiting_opt_text, cur_q_type, cur_correct_indices
         if cur_q_no is None:
             return
 
         correct_index = None
+        correct_indices: Optional[List[int]] = None
+
+        # If we detected correct markers directly in text, trust that first.
+        if cur_correct_indices:
+            if cur_q_type and cur_q_type.upper() == "MSQ":
+                correct_indices = sorted(set(cur_correct_indices))
+            else:
+                correct_index = cur_correct_indices[0]
+
+        # Else fall back to green-highlighted option IDs (if available)
         if cur_option_ids and correct_set:
-            for idx, oid in enumerate(cur_option_ids, start=1):
-                if oid in correct_set:
-                    # For MCQ there should be one; for MSQ we currently pick the first.
-                    correct_index = idx
-                    break
+            green_hits = [idx for idx, oid in enumerate(cur_option_ids, start=1) if oid in correct_set]
+            if green_hits:
+                if cur_q_type and cur_q_type.upper() == "MSQ":
+                    correct_indices = green_hits
+                else:
+                    correct_index = green_hits[0]
 
         questions.append(
             ParsedQuestion(
                 q_no=cur_q_no,
                 question=" ".join(cur_q_text).strip(),
                 options=[o.strip() for o in cur_options if o.strip()],
+                question_type=cur_q_type,
                 correct_index=correct_index,
+                correct_indices=correct_indices,
             )
         )
 
@@ -379,6 +404,8 @@ def parse_iitm_question_paper(
         cur_q_text = []
         cur_options = []
         cur_option_ids = []
+        cur_q_type = None
+        cur_correct_indices = []
         in_options = False
         awaiting_opt_text = False
 
@@ -390,6 +417,8 @@ def parse_iitm_question_paper(
             cur_q_text = []
             cur_options = []
             cur_option_ids = []
+            cur_q_type = None
+            cur_correct_indices = []
             in_options = False
             awaiting_opt_text = False
             continue
@@ -402,7 +431,34 @@ def parse_iitm_question_paper(
             awaiting_opt_text = False
             continue
 
+        # Question type sometimes appears on the same long line as Question Number metadata
+        mt = _IITM_QTYPE_RE.search(ln)
+        if mt and cur_q_type is None:
+            cur_q_type = mt.group(1).upper()
+
         if in_options:
+            # Option line can be either:
+            #   1) "640653... ." then next lines contain option text
+            #   2) "640653.... ☑ option text" (inline)
+            m_inline = _IITM_OPT_INLINE_RE.match(ln.strip())
+            if m_inline:
+                oid = m_inline.group(1)
+                rest = m_inline.group(2).strip()
+                cur_option_ids.append(oid)
+
+                # Detect correct marker inside the same line
+                is_correct = any(marker in rest for marker in _CORRECT_MARKERS)
+                # Remove marker glyphs from displayed option text
+                for marker in _CORRECT_MARKERS:
+                    rest = rest.replace(marker, "")
+                rest = rest.replace("☐", "").replace("⚠", "").replace("☆", "").replace("⚛", "").strip()
+
+                cur_options.append(rest)
+                if is_correct:
+                    cur_correct_indices.append(len(cur_options))  # 1-based
+                awaiting_opt_text = False
+                continue
+
             m_oid = _IITM_OPT_ID_RE.match(ln.strip())
             if m_oid:
                 cur_option_ids.append(m_oid.group(1))
@@ -412,10 +468,20 @@ def parse_iitm_question_paper(
 
             # Option text can span multiple lines. Attach to last option.
             if awaiting_opt_text and cur_options:
+                # Detect correctness markers that might be on the option-text line
+                opt_line = ln.strip()
+                is_correct = any(marker in opt_line for marker in _CORRECT_MARKERS)
+                for marker in _CORRECT_MARKERS:
+                    opt_line = opt_line.replace(marker, "")
+                opt_line = opt_line.replace("☐", "").replace("⚠", "").replace("☆", "").replace("⚛", "").strip()
+
                 if cur_options[-1]:
-                    cur_options[-1] += " " + ln.strip()
+                    cur_options[-1] += " " + opt_line
                 else:
-                    cur_options[-1] = ln.strip()
+                    cur_options[-1] = opt_line
+
+                if is_correct:
+                    cur_correct_indices.append(len(cur_options))  # 1-based
                 continue
 
         # Build question body. Skip noisy metadata lines.
